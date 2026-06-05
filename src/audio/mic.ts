@@ -222,6 +222,11 @@ export function createMicRecorder(
       recording = true;
       const thisProc = proc;
 
+      // sox/arecord write a format banner (and, on a TTY, a progress meter) to
+      // stderr; none of it is an error. Buffer it and only surface it if the
+      // process exits non-zero (handled in the "close" listener below).
+      let stderrBuffer = "";
+
       thisProc.stdout!.on("data", (chunk: Buffer) => {
         if (!recording || disposed) return;
 
@@ -240,16 +245,7 @@ export function createMicRecorder(
       });
 
       thisProc.stderr!.on("data", (data: Buffer) => {
-        const msg = data.toString().trim();
-        // arecord/sox print informational lines to stderr that are not
-        // real errors — only forward lines that look like failures.
-        if (
-          msg &&
-          !msg.startsWith("Recording") &&
-          !msg.startsWith("Input File")
-        ) {
-          emitter.emit("error", new Error(`[${desc.command}] ${msg}`));
-        }
+        stderrBuffer += data.toString();
       });
 
       thisProc.on("error", (err: Error) => {
@@ -272,9 +268,10 @@ export function createMicRecorder(
         }
         // Exit code 0 or null (killed by signal) are normal stop paths.
         if (code !== null && code !== 0) {
+          const detail = stderrBuffer.trim();
           emitter.emit(
             "error",
-            new Error(`"${desc.command}" exited with code ${code}`),
+            new Error(`"${desc.command}" exited with code ${code}${detail ? `: ${detail}` : ""}`),
           );
         }
       });

@@ -123,6 +123,10 @@ export function createAudioSpeaker(
   const platform = process.platform;
 
   const emitter = new EventEmitter();
+  // The returned speaker exposes no error channel, so emitting "error" with no
+  // listener attached would throw and crash the host process — this is what made
+  // sox's routine stderr banner fatal. Keep a no-op listener so emit() is safe.
+  emitter.on("error", () => {});
   let proc: ChildProcess | null = null;
   let playing = false;
   let disposed = false;
@@ -164,12 +168,19 @@ export function createAudioSpeaker(
     playing = true;
     const thisProc = proc;
 
+    // Players write routine diagnostics to stderr (sox prints a format banner;
+    // ffmpeg is chattier still). That is NOT an error, so buffer it and only
+    // surface it if the process actually exits non-zero (see "close" below).
+    let stderrBuffer = "";
     thisProc.stderr!.on("data", (data: Buffer) => {
-      const msg = data.toString().trim();
-      if (msg) {
-        emitter.emit("error", new Error(`[${desc.command}] ${msg}`));
-      }
+      stderrBuffer += data.toString();
     });
+
+    // Writes to the player's stdin can fail asynchronously with EPIPE when the
+    // player exits or is killed mid-stream (end of response, or an interrupt).
+    // Without an "error" listener Node escalates that to an uncaughtException,
+    // so swallow it here — teardown is handled by the "close"/stop paths.
+    thisProc.stdin?.on("error", () => {});
 
     thisProc.on("error", (err: Error) => {
       if (proc === thisProc) {
@@ -182,10 +193,17 @@ export function createAudioSpeaker(
       emitter.emit("error", new Error(msg));
     });
 
-    thisProc.on("close", () => {
+    thisProc.on("close", (code: number | null) => {
       if (proc === thisProc) {
         playing = false;
         proc = null;
+      }
+      if (code && code !== 0) {
+        const detail = stderrBuffer.trim();
+        emitter.emit(
+          "error",
+          new Error(`[${desc.command}] exited with code ${code}${detail ? `: ${detail}` : ""}`),
+        );
       }
     });
 
