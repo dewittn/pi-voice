@@ -38,6 +38,7 @@ const DEFAULT_TTS: TTSConfig = {
   toolCallBehavior: "announce",
   thinkingBehavior: "announce",
   interruptBehavior: "fade",
+  interruptOnInput: false,
   fadeDurationMs: 500,
   providerOptions: {},
 };

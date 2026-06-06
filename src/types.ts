@@ -28,6 +28,9 @@ export interface TTSConfig {
   toolCallBehavior: "skip" | "announce" | "announce-and-summarize";
   thinkingBehavior: "skip" | "announce" | "read";
   interruptBehavior: "immediate" | "fade" | "finish-sentence" | "lower-volume";
+  /** When true, submitting a new prompt while TTS is playing stops it (barge-in);
+   *  when false, the new response's audio queues after the current one. */
+  interruptOnInput: boolean;
   fadeDurationMs: number;
   providerOptions: Record<string, Record<string, unknown>>;
 }

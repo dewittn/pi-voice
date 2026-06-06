@@ -674,8 +674,10 @@ export default function piVoice(pi: ExtensionAPI) {
 
   pi.on("input", async (event, ctx) => {
     currentCtx = ctx;
-    // If user types while TTS is speaking, interrupt (non-blocking to avoid fade delay)
-    if (state.isSpeaking && event.source === "interactive") {
+    // If user types while TTS is speaking, interrupt (non-blocking to avoid fade
+    // delay) — but only when barge-in is enabled. With it off, the new turn's
+    // audio queues after the current one instead of cutting it off.
+    if (config.tts.interruptOnInput && state.isSpeaking && event.source === "interactive") {
       void interruptTTS();
     }
     ensureConversationController().onUserInput();

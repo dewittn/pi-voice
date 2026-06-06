@@ -810,6 +810,14 @@ function buildOutputSettings(config: VoiceConfig): SettingDescriptor[] {
       getCurrent: (c) => c.tts.interruptBehavior,
       apply: (c, v) => { c.tts.interruptBehavior = v as VoiceConfig["tts"]["interruptBehavior"]; },
     },
+    {
+      id: "tts.interruptOnInput",
+      label: "Interrupt on New Input",
+      values: ["on", "off"],
+      description: "Submit a new prompt while speaking: on = stop & read the new one | off = finish current, then queue",
+      getCurrent: (c) => c.tts.interruptOnInput ? "on" : "off",
+      apply: (c, v) => { c.tts.interruptOnInput = v === "on"; },
+    },
   ];
 }
 
