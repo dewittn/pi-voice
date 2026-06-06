@@ -457,6 +457,7 @@ function renderOverviewTab(
     ["/voice mute", "Mute TTS output"],
     ["/voice unmute", "Unmute TTS output"],
     ["/voice say <text>", "Speak arbitrary text via TTS"],
+    ["/replay", "Replay the last LLM response"],
     ["/voice conv on|off", "Toggle conversation mode"],
     ["/voice key <prov> <key>", "Set an API key for a provider"],
   ];

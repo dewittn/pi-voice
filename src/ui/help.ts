@@ -72,6 +72,7 @@ function renderHelp(config: VoiceConfig, width: number, theme: any): string[] {
   lines.push(t(`${pad}  ${fg("accent", padRight("/voice settings", 22))}Open settings panel`));
   lines.push(t(`${pad}  ${fg("accent", padRight("/voice setup", 22))}Run setup wizard`));
   lines.push(t(`${pad}  ${fg("accent", padRight("/voice conversation", 22))}Toggle conversation mode`));
+  lines.push(t(`${pad}  ${fg("accent", padRight("/replay", 22))}Replay last LLM response`));
   lines.push(t(`${pad}  ${fg("accent", padRight("/voice help", 22))}Show this help`));
   lines.push("");
 

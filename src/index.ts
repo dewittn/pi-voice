@@ -988,12 +988,29 @@ export default function piVoice(pi: ExtensionAPI) {
             `  ${config.keybindings.pushToTalk} — Push-to-talk / toggle`,
             ``,
             `Commands: /voice [start|stop|mute|unmute|settings|setup|conversation|provider|mode|trigger|key|status]`,
+            `          /replay — replay the last response`,
           ];
 
           ctx.ui.notify(lines.join("\n"), "info");
           break;
         }
       }
+    },
+  });
+
+  // ── /replay — re-speak the last LLM response ───────────────────────
+
+  pi.registerCommand("replay", {
+    description: "Replay the last LLM response via TTS",
+    handler: async (_args, ctx) => {
+      currentCtx = ctx;
+      // enqueueSpeech silently drops while muted, so give feedback instead of
+      // appearing to do nothing.
+      if (state.ttsMuted) {
+        ctx.ui.notify("🔇 TTS is muted — /voice unmute first to replay.", "info");
+        return;
+      }
+      await replayLastResponse(ctx);
     },
   });
 
