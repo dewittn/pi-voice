@@ -158,7 +158,10 @@ export class PiperTTSProvider extends BaseTTSProvider {
           linkedSignal.removeEventListener("abort", onAbort);
         });
 
-        // Write text to stdin and close.
+        // Writing to piper's stdin can fail asynchronously with EPIPE if the
+        // process exits early; without an "error" listener that crashes the
+        // host, so swallow it (the "close"/"error" handlers above own teardown).
+        proc.stdin!.on("error", () => {});
         proc.stdin!.write(text);
         proc.stdin!.end();
       });

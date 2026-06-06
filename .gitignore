@@ -10,3 +10,7 @@ SAFETY-AUDIT.md
 SECURITY-AUDIT.md
 UI_UX_AUDIT.md
 CONVERGENCE_AUDIT.md
+
+# local secrets & generated audio (stream-tts test)
+.env
+*.wav

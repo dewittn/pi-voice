@@ -40,9 +40,12 @@ export class ElevenLabsTTSProvider extends BaseTTSProvider {
 
   /** Resolve a friendly voice name to its ElevenLabs voice ID. */
   private resolveVoiceId(voice: string): string {
-    // If it looks like a UUID already, use it directly.
-    if (voice.includes("-") && voice.length > 20) return voice;
-    return VOICE_ID_MAP[voice.toLowerCase()] ?? VOICE_ID_MAP.rachel;
+    // A known friendly name (e.g. "rachel") maps to its ID; anything else is
+    // treated as a raw ElevenLabs voice ID — a 20-char alphanumeric string such
+    // as a custom or cloned voice — so bring-your-own voices work. Fall back to
+    // the default only when no voice was provided.
+    const trimmed = voice.trim();
+    return VOICE_ID_MAP[trimmed.toLowerCase()] ?? (trimmed || VOICE_ID_MAP.rachel);
   }
 
   async initialize(config: TTSConfig): Promise<void> {

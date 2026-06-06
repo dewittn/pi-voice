@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import type { AudioSpeaker, SpeakerOptions } from "../types.js";
 
@@ -10,6 +10,23 @@ const DEFAULT_SPEAKER_OPTIONS: SpeakerOptions = {
 
 /** Interval (ms) at which `fadeOut` steps volume down. */
 const FADE_STEP_MS = 20;
+
+/** Opt-in lifecycle logging (set PI_VOICE_DEBUG=1) for diagnosing playback. */
+const DEBUG_AUDIO = !!process.env.PI_VOICE_DEBUG;
+const dbg = (...a: unknown[]): void => { if (DEBUG_AUDIO) console.error("[speaker]", ...a); };
+
+/** Whether ffplay (ffmpeg) is installed — probed once and cached. */
+let _hasFfplay: boolean | null = null;
+function hasFfplay(): boolean {
+  if (_hasFfplay === null) {
+    try {
+      _hasFfplay = spawnSync("ffplay", ["-version"], { stdio: "ignore" }).status === 0;
+    } catch {
+      _hasFfplay = false;
+    }
+  }
+  return _hasFfplay;
+}
 
 // ─── Platform helpers ────────────────────────────────────────────────────
 
@@ -35,6 +52,24 @@ function buildSpawnDescriptor(
         ],
       };
     case "darwin":
+      // sox `play -` treats a short read from a pipe as end-of-input: when fed
+      // streaming chunks it plays ~0.15s, prints "Done." and exits, so the
+      // speaker respawns it per chunk → the audio cut-out/restart bug. ffplay
+      // streams a pipe continuously. Prefer it; fall back to sox if ffmpeg is
+      // not installed (degraded — streaming TTS will be choppy without ffplay).
+      if (hasFfplay()) {
+        return {
+          command: "ffplay",
+          args: [
+            "-f", `s${opts.bitDepth}le`,
+            "-ar", String(opts.sampleRate),
+            "-ch_layout", opts.channels === 1 ? "mono" : "stereo",
+            "-nodisp",
+            "-autoexit",
+            "-",
+          ],
+        };
+      }
       return {
         command: "play",
         args: [
@@ -47,12 +82,13 @@ function buildSpawnDescriptor(
         ],
       };
     case "win32":
+      // ffplay uses -ch_layout, not -ac (which it rejects with "Option not found").
       return {
         command: "ffplay",
         args: [
           "-f", `s${opts.bitDepth}le`,
           "-ar", String(opts.sampleRate),
-          "-ac", String(opts.channels),
+          "-ch_layout", opts.channels === 1 ? "mono" : "stereo",
           "-nodisp",
           "-autoexit",
           "-",
@@ -71,7 +107,7 @@ function toolInstallHint(platform: NodeJS.Platform): string {
     case "linux":
       return 'Install ALSA utilities: sudo apt-get install alsa-utils';
     case "darwin":
-      return 'Install SoX: brew install sox';
+      return 'Install ffmpeg (recommended, for smooth streaming) or SoX: brew install ffmpeg';
     case "win32":
       return 'Install FFmpeg (includes ffplay): choco install ffmpeg   (or download from https://ffmpeg.org)';
     default:
@@ -123,6 +159,10 @@ export function createAudioSpeaker(
   const platform = process.platform;
 
   const emitter = new EventEmitter();
+  // The returned speaker exposes no error channel, so emitting "error" with no
+  // listener attached would throw and crash the host process — this is what made
+  // sox's routine stderr banner fatal. Keep a no-op listener so emit() is safe.
+  emitter.on("error", () => {});
   let proc: ChildProcess | null = null;
   let playing = false;
   let disposed = false;
@@ -163,13 +203,21 @@ export function createAudioSpeaker(
 
     playing = true;
     const thisProc = proc;
+    dbg("spawn", desc.command);
 
+    // Players write routine diagnostics to stderr (sox prints a format banner;
+    // ffmpeg is chattier still). That is NOT an error, so buffer it and only
+    // surface it if the process actually exits non-zero (see "close" below).
+    let stderrBuffer = "";
     thisProc.stderr!.on("data", (data: Buffer) => {
-      const msg = data.toString().trim();
-      if (msg) {
-        emitter.emit("error", new Error(`[${desc.command}] ${msg}`));
-      }
+      stderrBuffer += data.toString();
     });
+
+    // Writes to the player's stdin can fail asynchronously with EPIPE when the
+    // player exits or is killed mid-stream (end of response, or an interrupt).
+    // Without an "error" listener Node escalates that to an uncaughtException,
+    // so swallow it here — teardown is handled by the "close"/stop paths.
+    thisProc.stdin?.on("error", () => {});
 
     thisProc.on("error", (err: Error) => {
       if (proc === thisProc) {
@@ -182,10 +230,19 @@ export function createAudioSpeaker(
       emitter.emit("error", new Error(msg));
     });
 
-    thisProc.on("close", () => {
+    thisProc.on("close", (code: number | null) => {
+      dbg("close code=" + code + (stderrBuffer.trim() ? " | stderr: " + stderrBuffer.trim() : ""));
       if (proc === thisProc) {
         playing = false;
         proc = null;
+      }
+      // Ignore non-zero exits we caused via kill() (stop/interrupt/dispose).
+      if (code && code !== 0 && !thisProc.killed) {
+        const detail = stderrBuffer.trim();
+        emitter.emit(
+          "error",
+          new Error(`[${desc.command}] exited with code ${code}${detail ? `: ${detail}` : ""}`),
+        );
       }
     });
 
@@ -194,6 +251,7 @@ export function createAudioSpeaker(
 
   function killProc(): void {
     if (proc === null) return;
+    dbg("killProc");
     const p = proc;
     proc = null;
     playing = false;

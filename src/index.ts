@@ -482,11 +482,18 @@ export default function piVoice(pi: ExtensionAPI) {
 
     try {
       while (speechQueue.length > 0) {
-        const item = speechQueue.shift()!;
+        // Coalesce every sentence queued so far into a single request. The agent
+        // produces text faster than it is spoken, so sentences pile up while the
+        // previous request is in flight; speaking them together removes the
+        // per-request latency gap that makes sentence-by-sentence playback choppy.
+        const batch = speechQueue
+          .splice(0, speechQueue.length)
+          .map((item) => item.text)
+          .join(" ");
         try {
           const tts = await ensureTTS();
           speechAbort = new AbortController();
-          await tts.speak(item.text, speechAbort.signal);
+          await tts.speak(batch, speechAbort.signal);
         } catch (err: any) {
           if (err.name === "AbortError") {
             speechQueue = []; // Clear queue on abort
