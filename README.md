@@ -44,8 +44,10 @@ You need basic audio tools for your OS. Most systems have these already:
 | OS | Mic capture | Audio playback | Install command |
 |----|------------|----------------|-----------------|
 | **Linux** | `arecord` | `aplay` | `sudo apt install alsa-utils` |
-| **macOS** | `sox` | `sox` | `brew install sox` |
+| **macOS** | `sox` | `ffplay` (sox fallback) | `brew install ffmpeg sox` |
 | **Windows** | `sox` | `ffplay` | `choco install sox.portable ffmpeg` |
+
+> On macOS, audio playback uses **ffplay** (from ffmpeg) for smooth streaming; install `ffmpeg` alongside `sox` (which still handles mic capture). Without ffmpeg, playback falls back to `sox`, but streamed speech may stutter.
 
 ---
 
