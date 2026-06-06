@@ -1,6 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import type { AudioSpeaker, SpeakerOptions } from "../types.js";
+import { vlog } from "../debug-log.js";
 
 const DEFAULT_SPEAKER_OPTIONS: SpeakerOptions = {
   sampleRate: 24000,
@@ -12,8 +13,8 @@ const DEFAULT_SPEAKER_OPTIONS: SpeakerOptions = {
 const FADE_STEP_MS = 20;
 
 /** Opt-in lifecycle logging (set PI_VOICE_DEBUG=1) for diagnosing playback. */
-const DEBUG_AUDIO = !!process.env.PI_VOICE_DEBUG;
-const dbg = (...a: unknown[]): void => { if (DEBUG_AUDIO) console.error("[speaker]", ...a); };
+const dbg = (message: string, data?: Record<string, unknown>): void =>
+  vlog("speaker", message, data);
 
 /** Whether ffplay (ffmpeg) is installed — probed once and cached. */
 let _hasFfplay: boolean | null = null;
@@ -168,6 +169,9 @@ export function createAudioSpeaker(
   let disposed = false;
   let volume = 1.0;
   let fadingOut = false;
+  // Timestamp of the last stdin write — used to surface idle gaps (the macOS
+  // App-Nap / device-idle window where a long-lived player goes unresponsive).
+  let lastWriteAt = 0;
 
   // ── Process lifecycle ───────────────────────────────────────────────
 
@@ -203,7 +207,7 @@ export function createAudioSpeaker(
 
     playing = true;
     const thisProc = proc;
-    dbg("spawn", desc.command);
+    dbg("spawn", { command: desc.command, pid: thisProc.pid });
 
     // Players write routine diagnostics to stderr (sox prints a format banner;
     // ffmpeg is chattier still). That is NOT an error, so buffer it and only
@@ -231,7 +235,12 @@ export function createAudioSpeaker(
     });
 
     thisProc.on("close", (code: number | null) => {
-      dbg("close code=" + code + (stderrBuffer.trim() ? " | stderr: " + stderrBuffer.trim() : ""));
+      dbg("close", {
+        pid: thisProc.pid,
+        code,
+        killed: thisProc.killed,
+        stderr: stderrBuffer.trim() || undefined,
+      });
       if (proc === thisProc) {
         playing = false;
         proc = null;
@@ -251,7 +260,7 @@ export function createAudioSpeaker(
 
   function killProc(): void {
     if (proc === null) return;
-    dbg("killProc");
+    dbg("killProc", { pid: proc.pid });
     const p = proc;
     proc = null;
     playing = false;
@@ -283,15 +292,32 @@ export function createAudioSpeaker(
    * writing. Silently no-ops if the stream is not writable.
    */
   function writeToProc(chunk: Buffer): boolean {
+    const now = Date.now();
+    const gap = lastWriteAt > 0 ? now - lastWriteAt : 0;
+    if (gap > 3000) {
+      // First write after a long quiet period — the prime suspect window for a
+      // stale player that no longer produces sound until respawned.
+      dbg("resume after idle", { gapMs: gap, pid: proc?.pid ?? null, alive: proc !== null && !proc.killed });
+    }
+    lastWriteAt = now;
+
     if (proc === null || proc.stdin === null || proc.stdin.destroyed) {
+      dbg("write dropped — no live stdin", { bytes: chunk.length });
       return false;
     }
 
     const scaled = scalePcm16(chunk, volume);
     try {
-      return proc.stdin.write(scaled);
-    } catch {
+      const ok = proc.stdin.write(scaled);
+      if (!ok) {
+        // Repeated backpressure means the player has stopped draining the pipe
+        // — i.e. it is alive but no longer playing (the stall we're hunting).
+        dbg("write backpressure", { bytes: chunk.length, pid: proc.pid });
+      }
+      return ok;
+    } catch (err) {
       // Process may have exited between the check and the write.
+      dbg("write threw", { error: err instanceof Error ? err.message : String(err) });
       return false;
     }
   }

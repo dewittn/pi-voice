@@ -1,5 +1,6 @@
 import { getApiKey } from "../config.js";
 import { redactSecrets } from "../utils.js";
+import { vlog } from "../debug-log.js";
 import { BaseTTSProvider } from "./base.js";
 import type { TTSProviderName, TTSConfig } from "../types.js";
 
@@ -88,6 +89,12 @@ export class ElevenLabsTTSProvider extends BaseTTSProvider {
     this._speaking = true;
     this.emit("start");
 
+    const startedAt = Date.now();
+    let chunks = 0;
+    let bytes = 0;
+    let firstChunkMs = -1;
+    vlog("eleven", "speak start", { chars: text.length, voiceId });
+
     try {
       const timeoutSignal = AbortSignal.timeout(15000);
       const combinedSignal = AbortSignal.any([linkedSignal, timeoutSignal]);
@@ -109,6 +116,8 @@ export class ElevenLabsTTSProvider extends BaseTTSProvider {
         signal: combinedSignal,
       });
 
+      vlog("eleven", "response", { status: response.status, ok: response.ok, ms: Date.now() - startedAt });
+
       if (!response.ok) {
         const body = await response.text().catch(() => "");
         throw new Error(
@@ -123,11 +132,20 @@ export class ElevenLabsTTSProvider extends BaseTTSProvider {
       for await (const raw of response.body as any as AsyncIterable<Uint8Array>) {
         if (linkedSignal.aborted) break;
         const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+        chunks++;
+        bytes += buf.length;
+        if (firstChunkMs < 0) {
+          firstChunkMs = Date.now() - startedAt;
+          vlog("eleven", "first chunk", { ms: firstChunkMs, bytes: buf.length });
+        }
         this.emitAudioChunk(buf, SAMPLE_RATE, CHANNELS, BIT_DEPTH);
       }
+
+      vlog("eleven", "speak done", { chunks, bytes, ms: Date.now() - startedAt, aborted: linkedSignal.aborted });
     } catch (err: any) {
-      if (linkedSignal.aborted) return;
       const msg = err instanceof Error ? err.message : String(err);
+      vlog("eleven", "speak error", { error: redactSecrets(msg), aborted: linkedSignal.aborted, chunks, bytes });
+      if (linkedSignal.aborted) return;
       this.emit("error", new Error(redactSecrets(msg)));
     } finally {
       this._speaking = false;

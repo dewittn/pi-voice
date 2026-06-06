@@ -46,6 +46,7 @@ import { VoiceStatusBar } from "./ui/status.js";
 import { showSettingsPanel } from "./ui/settings.js";
 import { runSetupWizard } from "./ui/wizard.js";
 import { showHelpOverlay } from "./ui/help.js";
+import { vlog } from "./debug-log.js";
 
 // ─── Main Extension Entry Point ─────────────────────────────────────────
 
@@ -204,12 +205,14 @@ export default function piVoice(pi: ExtensionAPI) {
   }
 
   function handleTTSStart(): void {
+    vlog("tts", "start");
     state.isSpeaking = true;
     updateStatus();
     ensureConversationController().onTTSStart();
   }
 
   function handleTTSEnd(): void {
+    vlog("tts", "end");
     state.isSpeaking = false;
     speaker?.setVolume(1.0);
     updateStatus();
@@ -221,6 +224,7 @@ export default function piVoice(pi: ExtensionAPI) {
   }
 
   function handleTTSError(err: Error): void {
+    vlog("tts", "error", { error: err.message });
     state.isSpeaking = false;
     updateStatus();
     currentCtx?.ui.notify(`TTS error: ${err.message}`, "error");
@@ -468,17 +472,22 @@ export default function piVoice(pi: ExtensionAPI) {
   // ── TTS: Speak / Stop ─────────────────────────────────────────────
 
   async function enqueueSpeech(text: string): Promise<void> {
-    if (state.ttsMuted || !text.trim()) return;
+    if (state.ttsMuted || !text.trim()) {
+      vlog("queue", "enqueue skipped", { muted: state.ttsMuted, empty: !text.trim() });
+      return;
+    }
     if (speechQueue.length >= 50) {
       speechQueue.pop(); // drop newest, not the one about to play
     }
     speechQueue.push({ text, type: "speech" });
+    vlog("queue", "enqueue", { chars: text.length, qlen: speechQueue.length, processing: speechProcessing });
     if (!speechProcessing) processSpeechQueue();
   }
 
   async function processSpeechQueue(): Promise<void> {
     if (speechProcessing) return;
     speechProcessing = true;
+    vlog("queue", "processing started", { qlen: speechQueue.length });
 
     try {
       while (speechQueue.length > 0) {
@@ -490,11 +499,14 @@ export default function piVoice(pi: ExtensionAPI) {
           .splice(0, speechQueue.length)
           .map((item) => item.text)
           .join(" ");
+        vlog("queue", "speak batch", { chars: batch.length });
         try {
           const tts = await ensureTTS();
           speechAbort = new AbortController();
           await tts.speak(batch, speechAbort.signal);
+          vlog("queue", "batch done", { qRemaining: speechQueue.length });
         } catch (err: any) {
+          vlog("queue", "batch error", { error: err?.message, name: err?.name });
           if (err.name === "AbortError") {
             speechQueue = []; // Clear queue on abort
             break;
@@ -505,10 +517,12 @@ export default function piVoice(pi: ExtensionAPI) {
     } finally {
       speechProcessing = false;
       speechAbort = null;
+      vlog("queue", "processing stopped");
     }
   }
 
   function stopTTS(): void {
+    vlog("tts", "stopTTS", { qlen: speechQueue.length, wasSpeaking: state.isSpeaking });
     speechQueue = [];
     speechAbort?.abort();
     speechAbort = null;
@@ -521,6 +535,7 @@ export default function piVoice(pi: ExtensionAPI) {
 
   async function interruptTTS(): Promise<void> {
     if (!state.isSpeaking) return;
+    vlog("tts", "interrupt", { behavior: config.tts.interruptBehavior });
 
     switch (config.tts.interruptBehavior) {
       case "immediate":
@@ -670,6 +685,7 @@ export default function piVoice(pi: ExtensionAPI) {
   // ── Message Streaming (TTS reads responses) ────────────────────────
 
   pi.on("message_start", async (_event, ctx) => {
+    vlog("msg", "message_start", { ttsActive: shouldTTSBeActive(), muted: state.ttsMuted });
     currentCtx = ctx;
     agentStreaming = true;
     thinkingAnnounced = false;
@@ -706,6 +722,7 @@ export default function piVoice(pi: ExtensionAPI) {
   });
 
   pi.on("message_end", async (_event, _ctx) => {
+    vlog("msg", "message_end");
     agentStreaming = false;
     if (shouldTTSBeActive()) {
       const processor = ensureTextProcessor();
