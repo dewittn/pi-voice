@@ -609,6 +609,14 @@ export default function piVoice(pi: ExtensionAPI) {
     state.ttsProvider = config.tts.provider;
     state.ttsActive = shouldTTSBeActive();
 
+    // When the provider itself didn't change, ensureTTS() reuses the existing
+    // instance, so voice/speed edits (including a pasted custom voice ID) must
+    // be pushed to it directly — otherwise they'd only take effect on restart.
+    if (!ttsChanged && ttsProvider) {
+      ttsProvider.setVoice(config.tts.voice);
+      ttsProvider.setSpeed(config.tts.speed);
+    }
+
     textProcessor?.updateConfig({
       codeBlockBehavior: config.tts.codeBlockBehavior,
       toolCallBehavior: config.tts.toolCallBehavior,

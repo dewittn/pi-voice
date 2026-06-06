@@ -5,6 +5,7 @@ import type {
   STTMode,
 } from "../types.js";
 import { getSTTProviders, getTTSProviders, setApiKey, getApiKey } from "../config.js";
+import { extractPastedText } from "../utils.js";
 import { truncateToWidth, matchesKey } from "@mariozechner/pi-tui";
 
 // ─── Types ──────────────────────────────────────────────────────────────
@@ -271,9 +272,13 @@ function handleKeyInput(
     return;
   }
 
-  // Accept printable ASCII characters
-  if (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) < 127) {
-    state.apiKeyBuffer += data;
+  // Accept typed characters and multi-character pastes alike. A pasted key
+  // arrives as one chunk, so filtering for printable text (rather than
+  // requiring a single character) lets the user paste a key instead of
+  // typing all 51 characters by hand.
+  const text = extractPastedText(data);
+  if (text) {
+    state.apiKeyBuffer += text;
     invalidate();
   }
 }

@@ -12,7 +12,13 @@ import {
   getApiKey,
   type ProviderInfo,
 } from "../config.js";
+import { extractPastedText } from "../utils.js";
 import { truncateToWidth, matchesKey } from "@mariozechner/pi-tui";
+
+// Sentinel value appended to every provider's voice list. Selecting it opens
+// an inline editor where the user can paste a raw voice ID (e.g. a cloned or
+// custom ElevenLabs voice) instead of picking a built-in preset.
+const CUSTOM_VOICE = "Custom";
 
 // ─── Constants ──────────────────────────────────────────────────────────
 
@@ -56,6 +62,11 @@ export async function showSettingsPanel(
       let cachedLines: string[] | null = null;
       let cachedWidth = 0;
 
+      // Inline custom-voice editor state. When `editingVoice` is true, all key
+      // input is routed to the text buffer until the user confirms or cancels.
+      let editingVoice = false;
+      let voiceBuffer = "";
+
       const invalidate = () => {
         cachedLines = null;
         tui.requestRender();
@@ -77,8 +88,76 @@ export async function showSettingsPanel(
         }
       };
 
+      // ── Custom-voice editor helpers ───────────────────────────
+      // Open the inline editor, pre-filling with the current custom ID (if the
+      // stored voice isn't a recognized preset) so it can be edited in place.
+      const startVoiceEdit = () => {
+        const isPreset = !!matchVoicePreset(config.tts.voice, config.tts.provider);
+        voiceBuffer = isPreset ? "" : config.tts.voice.trim();
+        editingVoice = true;
+        invalidate();
+      };
+
+      // Apply a value chosen by cycling the Voice row. The "Custom" sentinel
+      // opens the editor instead of being stored verbatim.
+      const selectVoiceValue = (value: string) => {
+        if (value === CUSTOM_VOICE) {
+          startVoiceEdit();
+          return;
+        }
+        config.tts.voice = value;
+        onConfigChange(config);
+        invalidate();
+      };
+
+      // Cycle the Voice row by +1/-1 through presets + "Custom".
+      const cycleVoice = (delta: number) => {
+        const cycle = getVoicesForProvider(config.tts.provider);
+        const preset = matchVoicePreset(config.tts.voice, config.tts.provider);
+        const curIdx = preset ? cycle.indexOf(preset) : cycle.indexOf(CUSTOM_VOICE);
+        const next = (curIdx + delta + cycle.length) % cycle.length;
+        selectVoiceValue(cycle[next]);
+      };
+
+      // Route a key to the open editor. Returns once handled.
+      const handleVoiceEdit = (data: string) => {
+        if (matchesKey(data, "escape")) {
+          editingVoice = false;
+          invalidate();
+          return;
+        }
+        if (matchesKey(data, "enter")) {
+          const id = voiceBuffer.trim();
+          if (id.length > 0) {
+            config.tts.voice = id;
+            onConfigChange(config);
+          }
+          editingVoice = false;
+          invalidate();
+          return;
+        }
+        if (matchesKey(data, "backspace")) {
+          if (voiceBuffer.length > 0) {
+            voiceBuffer = voiceBuffer.slice(0, -1);
+            invalidate();
+          }
+          return;
+        }
+        const text = extractPastedText(data);
+        if (text) {
+          voiceBuffer += text;
+          invalidate();
+        }
+      };
+
       // ── Input handling ────────────────────────────────────────
       const handleInput = (data: string) => {
+        // While editing a custom voice ID, the buffer captures every key.
+        if (editingVoice) {
+          handleVoiceEdit(data);
+          return;
+        }
+
         // Close
         if (matchesKey(data, "escape") || matchesKey(data, "q")) {
           done(undefined);
@@ -129,6 +208,24 @@ export async function showSettingsPanel(
           // Value cycling
           const item = items[selectedRow];
           if (item) {
+            // The Voice row supports a "Custom" entry with inline text entry,
+            // so it needs special handling instead of plain value cycling.
+            if (item.id === "tts.voice") {
+              if (matchesKey(data, "l")) {
+                cycleVoice(1);
+              } else if (matchesKey(data, "h")) {
+                cycleVoice(-1);
+              } else if (matchesKey(data, "enter")) {
+                // Enter edits when already on Custom, otherwise advances.
+                if (matchVoicePreset(config.tts.voice, config.tts.provider)) {
+                  cycleVoice(1);
+                } else {
+                  startVoiceEdit();
+                }
+              }
+              return;
+            }
+
             const current = item.getCurrent(config);
             const idx = item.values.indexOf(current);
             let changed = false;
@@ -223,21 +320,46 @@ export async function showSettingsPanel(
             break;
         }
 
+        // ── Custom voice editor (Output tab only) ───────────
+        if (editingVoice && activeTab === 2) {
+          lines.push("");
+          lines.push(truncateToWidth(theme.fg("muted", "  " + thinLine(inner)), w));
+          lines.push("");
+          lines.push(truncateToWidth("  " + theme.fg("accent", theme.bold(" Custom voice ID")), w));
+          lines.push("");
+          const display = voiceBuffer.length > 0
+            ? theme.fg("text", voiceBuffer)
+            : theme.fg("muted", "(paste your voice ID here)");
+          const cursor = theme.fg("accent", "█");
+          lines.push(truncateToWidth("    " + display + cursor, w));
+          lines.push("");
+          lines.push(truncateToWidth(
+            "    " + theme.fg("dim", voiceBuffer.length + " characters  •  Enter confirm  •  Esc cancel"),
+            w,
+          ));
+        }
+
         // ── Footer help bar ─────────────────────────────────
         lines.push("");
         lines.push(truncateToWidth(theme.fg("muted", "  " + thinLine(inner)), w));
 
         const isSettingsTab = activeTab >= 1 && activeTab <= 4;
         const helpItems: string[] = [];
-        helpItems.push("Tab/Shift+Tab switch tabs");
-        helpItems.push("1-6 jump to tab");
-        if (isSettingsTab) {
-          helpItems.push("Up/Down navigate");
-          helpItems.push("h/l or Enter change value");
+        if (editingVoice) {
+          helpItems.push("Type or paste voice ID");
+          helpItems.push("Enter confirm");
+          helpItems.push("Esc cancel");
         } else {
-          helpItems.push("Up/Down scroll");
+          helpItems.push("Tab/Shift+Tab switch tabs");
+          helpItems.push("1-6 jump to tab");
+          if (isSettingsTab) {
+            helpItems.push("Up/Down navigate");
+            helpItems.push("h/l or Enter change value");
+          } else {
+            helpItems.push("Up/Down scroll");
+          }
+          helpItems.push("Esc/q close");
         }
-        helpItems.push("Esc/q close");
         lines.push(truncateToWidth(
           "  " + theme.fg("dim", " " + helpItems.join("  |  ")),
           w,
@@ -644,8 +766,8 @@ function buildOutputSettings(config: VoiceConfig): SettingDescriptor[] {
       id: "tts.voice",
       label: "Voice",
       values: getVoicesForProvider(config.tts.provider),
-      description: "Voice preset for the active TTS provider",
-      getCurrent: (c) => c.tts.voice,
+      description: "Voice preset for the active provider — pick \"Custom\" to paste a voice ID",
+      getCurrent: (c) => voiceDisplay(c.tts.voice, c.tts.provider),
       apply: (c, v) => { c.tts.voice = v; },
     },
     {
@@ -818,7 +940,8 @@ function describeTTSProvider(providers: ProviderInfo[]): string {
 
 // ─── Voice Lists ────────────────────────────────────────────────────────
 
-function getVoicesForProvider(provider: TTSProviderName): string[] {
+/** Built-in voice presets for a provider (without the "Custom" sentinel). */
+function getVoicePresets(provider: TTSProviderName): string[] {
   switch (provider) {
     case "edge-tts":
       return [
@@ -845,6 +968,30 @@ function getVoicesForProvider(provider: TTSProviderName): string[] {
     case "system":
       return ["default"];
   }
+}
+
+/** The cycle list shown in settings: presets followed by "Custom". */
+function getVoicesForProvider(provider: TTSProviderName): string[] {
+  return [...getVoicePresets(provider), CUSTOM_VOICE];
+}
+
+/** Find the preset matching `voice` for a provider (case-insensitive). */
+function matchVoicePreset(voice: string, provider: TTSProviderName): string | undefined {
+  const trimmed = voice.trim().toLowerCase();
+  return getVoicePresets(provider).find((p) => p.toLowerCase() === trimmed);
+}
+
+/**
+ * Render the voice value for display: the canonical preset name if it matches
+ * one, otherwise "Custom (id…)" so the active custom ID is visible at a glance.
+ */
+function voiceDisplay(voice: string, provider: TTSProviderName): string {
+  const preset = matchVoicePreset(voice, provider);
+  if (preset) return preset;
+  const id = voice.trim();
+  if (!id) return CUSTOM_VOICE;
+  const shown = id.length > 20 ? id.slice(0, 20) + "…" : id;
+  return CUSTOM_VOICE + " (" + shown + ")";
 }
 
 // ─── Drawing Helpers ────────────────────────────────────────────────────
