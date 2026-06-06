@@ -12,6 +12,21 @@ const DEFAULT_SPEAKER_OPTIONS: SpeakerOptions = {
 /** Interval (ms) at which `fadeOut` steps volume down. */
 const FADE_STEP_MS = 20;
 
+/**
+ * Recycle the player process if it has sat idle at least this long (ms).
+ *
+ * A long-lived player left idle on macOS gets suspended (App Nap / the audio
+ * output going inactive): the process stays alive but stops producing sound
+ * for what's written next, until it is respawned — which is why the first
+ * response after a pause came in late or silent and a restart "fixed" it.
+ * Respawning on the first write after an idle gap sidesteps that entirely.
+ *
+ * The default sits comfortably above the gaps seen during active speech
+ * (~3-4s) and well below the multi-minute pauses that triggered the bug.
+ * Override with `PI_VOICE_RECYCLE_IDLE_MS`.
+ */
+const RECYCLE_IDLE_MS = Number(process.env.PI_VOICE_RECYCLE_IDLE_MS) || 8000;
+
 /** Opt-in lifecycle logging (set PI_VOICE_DEBUG=1) for diagnosing playback. */
 const dbg = (message: string, data?: Record<string, unknown>): void =>
   vlog("speaker", message, data);
@@ -258,6 +273,20 @@ export function createAudioSpeaker(
     return true;
   }
 
+  /**
+   * Kill the player if it has been idle long enough to have gone stale, so the
+   * next `ensureProc()` spawns a fresh one. Safe because a process this idle
+   * has already drained whatever was buffered — nothing in flight is lost.
+   */
+  function recycleIfStale(): void {
+    if (proc === null || lastWriteAt === 0) return;
+    const idle = Date.now() - lastWriteAt;
+    if (idle > RECYCLE_IDLE_MS) {
+      dbg("recycle stale player", { idleMs: idle, pid: proc.pid });
+      killProc();
+    }
+  }
+
   function killProc(): void {
     if (proc === null) return;
     dbg("killProc", { pid: proc.pid });
@@ -331,6 +360,7 @@ export function createAudioSpeaker(
      */
     play(chunk: Buffer): void {
       if (disposed) return;
+      recycleIfStale();
       if (!ensureProc()) return;
       writeToProc(chunk);
     },
@@ -341,6 +371,7 @@ export function createAudioSpeaker(
      */
     async playStream(stream: AsyncIterable<Buffer>): Promise<void> {
       if (disposed) return;
+      recycleIfStale();
       if (!ensureProc()) return;
 
       for await (const chunk of stream) {
