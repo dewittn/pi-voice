@@ -174,6 +174,11 @@ export function createAudioSpeaker(
   const opts: SpeakerOptions = { ...DEFAULT_SPEAKER_OPTIONS, ...userOpts };
   const platform = process.platform;
 
+  // Bytes of PCM that represent one millisecond of playback at this format
+  // (e.g. 24 kHz · mono · 16-bit = 48 bytes/ms). Used to convert bytes-written
+  // into real playback duration for the idle estimate below.
+  const bytesPerMs = (opts.sampleRate * opts.channels * (opts.bitDepth / 8)) / 1000;
+
   const emitter = new EventEmitter();
   // The returned speaker exposes no error channel, so emitting "error" with no
   // listener attached would throw and crash the host process — this is what made
@@ -184,9 +189,20 @@ export function createAudioSpeaker(
   let disposed = false;
   let volume = 1.0;
   let fadingOut = false;
-  // Timestamp of the last stdin write — used to surface idle gaps (the macOS
-  // App-Nap / device-idle window where a long-lived player goes unresponsive).
+  // Timestamp of the last stdin write — used only for the write-gap diagnostic.
   let lastWriteAt = 0;
+  // Estimated wall-clock time (epoch ms) at which the audio already written to the
+  // player will finish *playing*. Playback runs in real time but writes complete
+  // ~20× faster, so "time since last write" wildly underestimates how much audio is
+  // still queued. We advance this by each chunk's real duration and treat the
+  // player as idle only once playback has actually caught up — see recycleIfStale().
+  // Reset to 0 whenever the buffered audio is discarded (killProc).
+  let playbackEndsAt = 0;
+  // Per-player write stats, logged once at close/recycle instead of per write (the
+  // old per-write backpressure log buried the file under ~200k lines). A fresh
+  // object per spawn so a `close` event that fires after the next player has
+  // already spawned still reports the totals for the player that actually closed.
+  let stats = { bytesWritten: 0, backpressureCount: 0 };
 
   // ── Process lifecycle ───────────────────────────────────────────────
 
@@ -221,7 +237,9 @@ export function createAudioSpeaker(
     }
 
     playing = true;
+    stats = { bytesWritten: 0, backpressureCount: 0 };
     const thisProc = proc;
+    const thisStats = stats; // captured so the close handler reports this player's totals
     dbg("spawn", { command: desc.command, pid: thisProc.pid });
 
     // Players write routine diagnostics to stderr (sox prints a format banner;
@@ -250,18 +268,23 @@ export function createAudioSpeaker(
     });
 
     thisProc.on("close", (code: number | null) => {
+      const erroredOut = !!code && code !== 0 && !thisProc.killed;
       dbg("close", {
         pid: thisProc.pid,
         code,
         killed: thisProc.killed,
-        stderr: stderrBuffer.trim() || undefined,
+        bytesWritten: thisStats.bytesWritten,
+        backpressureCount: thisStats.backpressureCount,
+        // The player's startup banner is multi-line and noisy; only attach stderr
+        // when the exit is an actual error worth reading.
+        stderr: erroredOut ? stderrBuffer.trim().slice(0, 500) : undefined,
       });
       if (proc === thisProc) {
         playing = false;
         proc = null;
       }
       // Ignore non-zero exits we caused via kill() (stop/interrupt/dispose).
-      if (code && code !== 0 && !thisProc.killed) {
+      if (erroredOut) {
         const detail = stderrBuffer.trim();
         emitter.emit(
           "error",
@@ -274,25 +297,35 @@ export function createAudioSpeaker(
   }
 
   /**
-   * Kill the player if it has been idle long enough to have gone stale, so the
-   * next `ensureProc()` spawns a fresh one. Safe because a process this idle
-   * has already drained whatever was buffered — nothing in flight is lost.
+   * Kill the player if playback finished (the buffer drained) long enough ago for
+   * it to have gone stale, so the next `ensureProc()` spawns a fresh one. Keyed
+   * off the estimated playback-end time, NOT the last write — a player still
+   * working through buffered audio must never be killed mid-playback (that cut off
+   * long responses whenever a tool call paused writes for >RECYCLE_IDLE_MS).
    */
   function recycleIfStale(): void {
-    if (proc === null || lastWriteAt === 0) return;
-    const idle = Date.now() - lastWriteAt;
+    if (proc === null || playbackEndsAt === 0) return;
+    const idle = Date.now() - playbackEndsAt;
     if (idle > RECYCLE_IDLE_MS) {
-      dbg("recycle stale player", { idleMs: idle, pid: proc.pid });
+      dbg("recycle stale player", { idleMs: idle, bytesWritten: stats.bytesWritten, pid: proc.pid });
       killProc();
     }
   }
 
   function killProc(): void {
     if (proc === null) return;
-    dbg("killProc", { pid: proc.pid });
+    // estRemainingMs > 0 means we are discarding audio that had not finished
+    // playing (expected on barge-in/stop; should be ~0 for an idle recycle).
+    dbg("killProc", {
+      pid: proc.pid,
+      bytesWritten: stats.bytesWritten,
+      backpressureCount: stats.backpressureCount,
+      estRemainingMs: Math.max(0, Math.round(playbackEndsAt - Date.now())),
+    });
     const p = proc;
     proc = null;
     playing = false;
+    playbackEndsAt = 0;
 
     try {
       if (p.stdin && !p.stdin.destroyed) {
@@ -324,9 +357,15 @@ export function createAudioSpeaker(
     const now = Date.now();
     const gap = lastWriteAt > 0 ? now - lastWriteAt : 0;
     if (gap > 3000) {
-      // First write after a long quiet period — the prime suspect window for a
-      // stale player that no longer produces sound until respawned.
-      dbg("resume after idle", { gapMs: gap, pid: proc?.pid ?? null, alive: proc !== null && !proc.killed });
+      // First write after a long quiet period. bufferedAheadMs shows whether the
+      // player was still mid-playback (>0) or had genuinely drained (≤0) — the
+      // distinction the old write-idle recycle got wrong.
+      dbg("resume after idle", {
+        gapMs: gap,
+        bufferedAheadMs: playbackEndsAt === 0 ? 0 : Math.round(playbackEndsAt - now),
+        pid: proc?.pid ?? null,
+        alive: proc !== null && !proc.killed,
+      });
     }
     lastWriteAt = now;
 
@@ -338,11 +377,11 @@ export function createAudioSpeaker(
     const scaled = scalePcm16(chunk, volume);
     try {
       const ok = proc.stdin.write(scaled);
-      if (!ok) {
-        // Repeated backpressure means the player has stopped draining the pipe
-        // — i.e. it is alive but no longer playing (the stall we're hunting).
-        dbg("write backpressure", { bytes: chunk.length, pid: proc.pid });
-      }
+      // Advance the playback-end estimate by this chunk's real duration, measured
+      // from whichever is later: now, or the end of audio already queued.
+      stats.bytesWritten += scaled.length;
+      playbackEndsAt = Math.max(playbackEndsAt, now) + scaled.length / bytesPerMs;
+      if (!ok) stats.backpressureCount++;
       return ok;
     } catch (err) {
       // Process may have exited between the check and the write.

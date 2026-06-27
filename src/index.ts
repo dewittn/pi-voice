@@ -740,6 +740,7 @@ export default function piVoice(pi: ExtensionAPI) {
   // ── Tool Call Announcements ────────────────────────────────────────
 
   pi.on("tool_call", async (event, _ctx) => {
+    vlog("tool", "tool_call", { tool: event.toolName });
     if (!shouldTTSBeActive()) return;
 
     const processor = ensureTextProcessor();
